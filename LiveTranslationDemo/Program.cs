@@ -4,6 +4,9 @@ using Microsoft.CognitiveServices.Speech.Translation;
 
 class Program
 {
+    // Semaphore to serialize speech synthesis operations
+    private static readonly SemaphoreSlim synthesizeSemaphore = new SemaphoreSlim(1, 1);
+
     static async Task Main(string[] args)
     {
         Console.WriteLine("Azure Live Translation Demo");
@@ -62,7 +65,7 @@ class Program
             }
         };
 
-        translationRecognizer.Recognized += async (s, e) =>
+        translationRecognizer.Recognized += (s, e) =>
         {
             if (e.Result.Reason == ResultReason.TranslatedSpeech)
             {
@@ -76,7 +79,18 @@ class Program
                     // Synthesize German translation to speech
                     if (translation.Key == "de")
                     {
-                        await SynthesizeGermanSpeechAsync(speechKey, speechRegion, translatedText);
+                        // Queue speech synthesis to avoid concurrent operations and handle exceptions
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await SynthesizeGermanSpeechAsync(speechKey, speechRegion, translatedText);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"    ERROR during speech synthesis: {ex.Message}");
+                            }
+                        });
                     }
                 }
             }
@@ -121,31 +135,40 @@ class Program
 
     static async Task SynthesizeGermanSpeechAsync(string speechKey, string speechRegion, string text)
     {
-        // Configure speech synthesis
-        var speechConfig = SpeechConfig.FromSubscription(speechKey, speechRegion);
-        speechConfig.SpeechSynthesisVoiceName = "de-DE-KatjaNeural";
-
-        // Use default speaker for audio output
-        using var audioConfig = AudioConfig.FromDefaultSpeakerOutput();
-        using var speechSynthesizer = new SpeechSynthesizer(speechConfig, audioConfig);
-
-        Console.WriteLine($"    SPEAKING: {text}");
-        
-        var result = await speechSynthesizer.SpeakTextAsync(text);
-
-        if (result.Reason == ResultReason.SynthesizingAudioCompleted)
+        // Use semaphore to serialize speech synthesis operations
+        await synthesizeSemaphore.WaitAsync();
+        try
         {
-            Console.WriteLine($"    Speech synthesis completed.");
-        }
-        else if (result.Reason == ResultReason.Canceled)
-        {
-            var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
-            Console.WriteLine($"    CANCELED: Reason={cancellation.Reason}");
+            // Configure speech synthesis
+            var speechConfig = SpeechConfig.FromSubscription(speechKey, speechRegion);
+            speechConfig.SpeechSynthesisVoiceName = "de-DE-KatjaNeural";
 
-            if (cancellation.Reason == CancellationReason.Error)
+            // Use default speaker for audio output
+            using var audioConfig = AudioConfig.FromDefaultSpeakerOutput();
+            using var speechSynthesizer = new SpeechSynthesizer(speechConfig, audioConfig);
+
+            Console.WriteLine($"    SPEAKING: {text}");
+            
+            var result = await speechSynthesizer.SpeakTextAsync(text);
+
+            if (result.Reason == ResultReason.SynthesizingAudioCompleted)
             {
-                Console.WriteLine($"    CANCELED: ErrorDetails={cancellation.ErrorDetails}");
+                Console.WriteLine($"    Speech synthesis completed.");
             }
+            else if (result.Reason == ResultReason.Canceled)
+            {
+                var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
+                Console.WriteLine($"    CANCELED: Reason={cancellation.Reason}");
+
+                if (cancellation.Reason == CancellationReason.Error)
+                {
+                    Console.WriteLine($"    CANCELED: ErrorDetails={cancellation.ErrorDetails}");
+                }
+            }
+        }
+        finally
+        {
+            synthesizeSemaphore.Release();
         }
     }
 }
